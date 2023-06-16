@@ -165,7 +165,15 @@ drdid_rc <-function(y, post, D, covariates, i.weights = NULL,
   att.d.pre <- mean(eta.d.pre)
   att.dt0.pre <- mean(eta.dt0.pre)
 
-
+  print("new")
+  print(att.treat.post)
+  print(att.treat.pre)
+  print(att.cont.post)
+  print(att.cont.pre)
+  print(att.d.post)
+  print(att.dt1.post)
+  print(att.d.pre)
+  print(att.dt0.pre)
   # ATT estimator
   dr.att <- (att.treat.post - att.treat.pre) - (att.cont.post - att.cont.pre) +
     (att.d.post - att.dt1.post) - (att.d.pre - att.dt0.pre)
