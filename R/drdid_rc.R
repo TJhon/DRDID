@@ -139,6 +139,7 @@ drdid_rc <-function(y, post, D, covariates, i.weights = NULL,
   w.d <- i.weights * D
   w.dt1 <- i.weights * D * post
   w.dt0 <- i.weights * D * (1 - post)
+  print("new")
 
   # Elements of the influence function (summands)
   eta.treat.pre <- w.treat.pre * (y - out.y.cont) / mean(w.treat.pre)
@@ -151,7 +152,7 @@ drdid_rc <-function(y, post, D, covariates, i.weights = NULL,
   eta.dt1.post <- w.dt1 * (out.y.treat.post - out.y.cont.post)/mean(w.dt1)
   eta.d.pre <- w.d * (out.y.treat.pre - out.y.cont.pre)/mean(w.d)
   eta.dt0.pre <- w.dt0 * (out.y.treat.pre - out.y.cont.pre)/mean(w.dt0)
-
+  print(eta.d.post)
 
   # Estimator of each component
   att.treat.pre <- mean(eta.treat.pre)
@@ -165,15 +166,11 @@ drdid_rc <-function(y, post, D, covariates, i.weights = NULL,
   att.d.pre <- mean(eta.d.pre)
   att.dt0.pre <- mean(eta.dt0.pre)
 
-  print("new")
-  print(att.treat.post)
-  print(att.treat.pre)
-  print(att.cont.post)
-  print(att.cont.pre)
-  print(att.d.post)
-  print(att.dt1.post)
-  print(att.d.pre)
-  print(att.dt0.pre)
+
+  # print(att.d.post)
+  # print(att.dt1.post)
+  # print(att.d.pre)
+  # print(att.dt0.pre)
   # ATT estimator
   dr.att <- (att.treat.post - att.treat.pre) - (att.cont.post - att.cont.pre) +
     (att.d.post - att.dt1.post) - (att.d.pre - att.dt0.pre)
