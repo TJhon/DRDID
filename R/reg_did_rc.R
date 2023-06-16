@@ -59,10 +59,11 @@ NULL
 #'
 #' @export
 
-reg_did_rc <-function(y, post, D, covariates, i.weights = NULL,
+reg_did_rc <-function(y, post, D, covariates, i_weights = NULL,
                       boot = FALSE, boot.type = "weighted", nboot = NULL,
                       inffunc = FALSE){
   #-----------------------------------------------------------------------------
+  print('regdid_rc')
   # D as vector
   D <- as.vector(D)
   # post as vector
@@ -72,144 +73,95 @@ reg_did_rc <-function(y, post, D, covariates, i.weights = NULL,
   # outcome of interested
   y <- as.vector(y)
   # Add constant to covariate vector
-  int.cov <- as.matrix(rep(1,n))
-  if (!is.null(covariates)){
-    if(all(as.matrix(covariates)[,1]==rep(1,n))){
-      int.cov <- as.matrix(covariates)
-    } else {
-      int.cov <- as.matrix(cbind(1, covariates))
-    }
-  }
+
+  int_cov <- has_intercept(covariates, n)
+
   # Weights
-  if(is.null(i.weights)) {
-    i.weights <- as.vector(rep(1, n))
-  } else if(min(i.weights) < 0) stop("i.weights must be non-negative")
 
+  i_weights <- has_weights(i_weights, n)
 
   #-----------------------------------------------------------------------------
   #Compute the Outcome regression for the control group at the pre-treatment period, using ols.
-  reg.coeff.pre <- stats::coef(stats::lm(y ~ -1 + int.cov,
-                                         subset = ((D==0) & (post==0)),
-                                         weights = i.weights))
-  if(anyNA(reg.coeff.pre)){
-    stop("Outcome regression model coefficients have NA components. \n Multicollinearity of covariates is probably the reason for it.")
-  }
-  out.y.pre <-   as.vector(tcrossprod(reg.coeff.pre, int.cov))
+
+  pre_filter <- ((D == 0) & (post == 0))
+  out_y_pre <- out_wols(y, int_cov, pre_filter, i_weights)
   #-----------------------------------------------------------------------------
   #Compute the Outcome regression for the control group at the pre-treatment period, using ols.
-  reg.coeff.post <- stats::coef(stats::lm(y ~ -1 + int.cov,
-                                          subset = ((D==0) & (post==1)),
-                                          weights = i.weights))
-  if(anyNA(reg.coeff.post)){
-    stop("Outcome regression model coefficients have NA components. \n Multicollinearity (or lack of variation) of covariates is probably the reason for it.")
-  }
-  out.y.post <-   as.vector(tcrossprod(reg.coeff.post, int.cov))
+  post_filter <- ((D == 0) & (post == 1))
+  out_y_post <- out_wols(y, int_cov, post_filter, i_weights)
+
   #-----------------------------------------------------------------------------
   #Compute the OR DiD estimators
   # First, the weights
-  w.treat.pre <- i.weights * D * (1 - post)
-  w.treat.post <- i.weights * D * post
-  w.cont <- i.weights * D
+  w_treat_pre <- w_tc_val(i_weights, D, 1 - post)
+  w_treat_post <- w_tc_val(i_weights, D, post)
+  w_cont <- i_weights * D
 
-  reg.att.treat.pre <- w.treat.pre * y
-  reg.att.treat.post <- w.treat.post * y
-  reg.att.cont <- w.cont * (out.y.post - out.y.pre)
+  reg_att_treat_pre <- w_treat_pre * y
+  reg_att_treat_post <- w_treat_post * y
+  reg_att_cont <- w_cont * (out_y_post - out_y_pre)
 
-  eta.treat.pre <- mean(reg.att.treat.pre) / mean(w.treat.pre)
-  eta.treat.post <- mean(reg.att.treat.post) / mean(w.treat.post)
-  eta.cont <- mean(reg.att.cont) / mean(w.cont)
+  eta_treat_pre  <- eta_val(reg_att_treat_pre, w_treat_pre)
+  eta_treat_post <- eta_val(reg_att_treat_post, w_treat_post)
+  eta_cont <- eta_val(reg_att_cont, w_cont)
 
-  reg.att <- (eta.treat.post - eta.treat.pre) - eta.cont
+  reg_att <- (eta_treat_post - eta_treat_pre) - eta_cont
 
   #-----------------------------------------------------------------------------
   #get the influence function to compute standard error
   #-----------------------------------------------------------------------------
   # First, the influence function of the nuisance functions
   # Asymptotic linear representation of OLS parameters in pre-period
-  weights.ols.pre <- i.weights * (1 - D) * (1 - post)
-  wols.x.pre <- weights.ols.pre * int.cov
-  wols.eX.pre <- weights.ols.pre * (y - out.y.pre) * int.cov
-  XpX.inv.pre <- qr.solve(crossprod(wols.x.pre, int.cov)/n)
-  asy.lin.rep.ols.pre <-  wols.eX.pre %*% XpX.inv.pre
+
+  d <- (1 - D)
+  asy_lin_rep_ols_pre <- asy_lin_rep_olsf(
+    i_weights, d, (1 - post), int_cov, y, out_y_pre
+  )
 
   # Asymptotic linear representation of OLS parameters in post-period
-  weights.ols.post <- i.weights * (1 - D) * post
-  wols.x.post <- weights.ols.post * int.cov
-  wols.eX.post <- weights.ols.post * (y - out.y.post) * int.cov
-  XpX.inv.post <- qr.solve(crossprod(wols.x.post, int.cov)/n)
-  asy.lin.rep.ols.post <-  wols.eX.post %*% XpX.inv.post
+  asy_lin_rep_ols_post <- asy_lin_rep_olsf(
+    i_weights, d, post, int_cov, y, out_y_post
+  )
   #-----------------------------------------------------------------------------
   # Now, the influence function of the "treat" component
   # Leading term of the influence function
-  inf.treat.pre <- (reg.att.treat.pre - w.treat.pre * eta.treat.pre) / mean(w.treat.pre)
-  inf.treat.post <- (reg.att.treat.post - w.treat.post * eta.treat.post) / mean(w.treat.post)
-  inf.treat <- inf.treat.post - inf.treat.pre
+  inf_treat_pre  <- inf_treatf(reg_att_treat_pre, w_treat_pre, eta_treat_pre)
+  inf_treat_post <- inf_treatf(reg_att_treat_post, w_treat_post, eta_treat_post)
+  inf_treat <- inf_treat_post - inf_treat_pre
   #-----------------------------------------------------------------------------
   # Now, get the influence function of control component
   # Leading term of the influence function: no estimation effect
-  inf.cont.1 <- (reg.att.cont - w.cont * eta.cont)
+  inf_cont_1 <- (reg_att_cont - w_cont * eta_cont)
   # Estimation effect from beta hat (OLS using only controls)
   # Derivative matrix (k x 1 vector)
-  M1 <- base::colMeans(w.cont * int.cov)
+  M1 <- base::colMeans(w_cont * int_cov)
   # Now get the influence function related to the estimation effect related to beta's in post-treatment
-  inf.cont.2.post <- asy.lin.rep.ols.post %*% M1
+  inf_cont_2_post <- asy_lin_rep_ols_post %*% M1
   # Now get the influence function related to the estimation effect related to beta's in pre-treatment
-  inf.cont.2.pre <- asy.lin.rep.ols.pre %*% M1
+  inf_cont_2_pre <- asy_lin_rep_ols_pre %*% M1
   # Influence function for the control component
-  inf.control <- (inf.cont.1 + inf.cont.2.post - inf.cont.2.pre) / mean(w.cont)
+  inf_control <- (inf_cont_1 + inf_cont_2_post - inf_cont_2_pre) / mean(w_cont)
   #-----------------------------------------------------------------------------
   #get the influence function of the DR estimator (put all pieces together)
-  reg.att.inf.func <- (inf.treat - inf.control)
+  reg_att_inf_func <- (inf_treat - inf_control)
   #-----------------------------------------------------------------------------
-  if (boot == FALSE) {
-    # Estimate of standard error
-    se.reg.att <- stats::sd(reg.att.inf.func)/sqrt(n)
-    # Estimate of upper boudary of 95% CI
-    uci <- reg.att + 1.96 * se.reg.att
-    # Estimate of lower doundary of 95% CI
-    lci <- reg.att - 1.96 * se.reg.att
-    #Create this null vector so we can export the bootstrap draws too.
-    reg.boot <- NULL
-  }
+  setup <- list(
+    n = n, y = y,
+    d = D, int_cov = int_cov,
+    i_weights = i_weights, reg_att = reg_att
+  )
 
-  if (boot == TRUE) {
-    if (is.null(nboot) == TRUE) nboot = 999
-    if(boot.type == "multiplier"){
-      # do multiplier bootstrap
-      reg.boot <- mboot.did(reg.att.inf.func, nboot)
-      # get bootstrap std errors based on IQR
-      se.reg.att <- stats::IQR(reg.boot) / (stats::qnorm(0.75) - stats::qnorm(0.25))
-      # get symmtric critival values
-      cv <- stats::quantile(abs(reg.boot/se.reg.att), probs = 0.95)
-      # Estimate of upper boudary of 95% CI
-      uci <- reg.att + cv * se.reg.att
-      # Estimate of lower doundary of 95% CI
-      lci <- reg.att - cv * se.reg.att
-    } else {
-      # do weighted bootstrap
-      reg.boot <- unlist(lapply(1:nboot, wboot_reg_rc,
-                                n = n, y = y, post = post, D = D, int.cov = int.cov, i.weights = i.weights))
-      # get bootstrap std errors based on IQR
-      se.reg.att <- stats::IQR((reg.boot - reg.att)) / (stats::qnorm(0.75) - stats::qnorm(0.25))
-      # get symmtric critival values
-      cv <- stats::quantile(abs((reg.boot - reg.att)/se.reg.att), probs = 0.95)
-      # Estimate of upper boudary of 95% CI
-      uci <- reg.att + cv * se.reg.att
-      # Estimate of lower doundary of 95% CI
-      lci <- reg.att - cv * se.reg.att
-
-    }
-  }
+  ref_se <- bstrap_se(reg_att_inf_func, boot, nboot, boot.type, setup, wboot_reg_rc)
 
 
-  if(inffunc == FALSE) reg.att.inf.func <- NULL
+
+  if(inffunc == FALSE) reg_att_inf_func <- NULL
   #---------------------------------------------------------------------
   # record the call
   call.param <- match.call()
   # Record all arguments used in the function
   argu <- mget(names(formals()), sys.frame(sys.nframe()))
   boot.type <- ifelse(argu$boot.type=="multiplier", "multiplier", "weighted")
-  boot <- ifelse(argu$boot == TRUE, TRUE, FALSE)
   argu <- list(
     panel = FALSE,
     boot = boot,
@@ -217,17 +169,16 @@ reg_did_rc <-function(y, post, D, covariates, i.weights = NULL,
     nboot = nboot,
     type = "or"
   )
-  ret <- (list(ATT = reg.att,
-               se = se.reg.att,
-               uci = uci,
-               lci = lci,
-               boots = reg.boot,
-               att.inf.func = reg.att.inf.func,
+  ret <- (list(ATT = reg_att,
+               se = ref_se$se,
+               uci = ref_se$uci,
+               lci = ref_se$lci,
+               boots = ref_se$boots,
+               att.inf.func = reg_att_inf_func,
                call.param = call.param,
                argu = argu))
   # Define a new class
   class(ret) <- "drdid"
-
   # return the list
   return(ret)
 }
