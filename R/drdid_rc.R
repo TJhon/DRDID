@@ -59,8 +59,8 @@ NULL
 #'
 #' @export
 
-drdid_rc <-function(y, post, D, covariates, i.weights = NULL,
-                    boot = FALSE, boot.type =  "weighted", nboot = NULL,
+drdid_rc <-function(y, post, D, covariates, i_weights = NULL,
+                    boot = FALSE, boot_type =  "weighted", nboot = NULL,
                     inffunc = FALSE){
   #-----------------------------------------------------------------------------
   # D as vector
@@ -72,246 +72,181 @@ drdid_rc <-function(y, post, D, covariates, i.weights = NULL,
   # post as vector
   post <- as.vector(post)
   # Add constant to covariate vector
-  int.cov <- as.matrix(rep(1,n))
-  if (!is.null(covariates)){
-    if(all(as.matrix(covariates)[,1]==rep(1,n))){
-      int.cov <- as.matrix(covariates)
-    } else {
-      int.cov <- as.matrix(cbind(1, covariates))
-    }
-  }
+  int_cov <- has_intercept(covariates, n)
 
   # Weights
-  if(is.null(i.weights)) {
-    i.weights <- as.vector(rep(1, n))
-  } else if(min(i.weights) < 0) stop("i.weights must be non-negative")
+  i_weights <- has_weights(i_weights)
   #-----------------------------------------------------------------------------
   #Compute the Pscore by MLE
-  pscore.tr <- stats::glm(D ~ -1 + int.cov, family = "binomial", weights = i.weights)
-  if(pscore.tr$converged == FALSE){
-    warning(" glm algorithm did not converge")
-  }
-  if(anyNA(pscore.tr$coefficients)){
-    stop("Propensity score model coefficients have NA components. \n Multicollinearity (or lack of variation) of covariates is a likely reason.")
-  }
-  ps.fit <- as.vector(pscore.tr$fitted.values)
-  # Avoid divide by zero
-  ps.fit <- pmin(ps.fit, 1 - 1e-16)
-  #Compute the Outcome regression for the control group at the pre-treatment period, using ols.
-  reg.cont.coeff.pre <- stats::coef(stats::lm(y ~ -1 + int.cov,
-                                              subset = ((D==0) & (post==0)),
-                                              weights = i.weights))
-  if(anyNA(reg.cont.coeff.pre)){
-    stop("Outcome regression model coefficients have NA components. \n Multicollinearity (or lack of variation) of covariates is a likely reason.")
-  }
-  out.y.cont.pre <-   as.vector(tcrossprod(reg.cont.coeff.pre, int.cov))
-  #Compute the Outcome regression for the control group at the post-treatment period, using ols.
-  reg.cont.coeff.post <- stats::coef(stats::lm(y ~ -1 + int.cov,
-                                               subset = ((D==0) & (post==1)),
-                                               weights = i.weights))
-  if(anyNA(reg.cont.coeff.post)){
-    stop("Outcome regression model coefficients have NA components. \n Multicollinearity (or lack of variation) of covariates is a likely reason.")
-  }
-  out.y.cont.post <-   as.vector(tcrossprod(reg.cont.coeff.post, int.cov))
-  # Combine the ORs for control group
-  out.y.cont <- post * out.y.cont.post + (1 - post) * out.y.cont.pre
+  pscore_tr <- fit_ps(D, int_cov, i_weights, T)
+  ps_fit <- pscore_tr$fit
 
+  #Compute the Outcome regression for the control group at the pre-treatment period, using ols.
+  pre_filter <- ((D == 0) & (post == 0))
+  out_y_cont_pre <- out_wols(y, int_cov, pre_filter, i_weights)
+  #Compute the Outcome regression for the control group at the post-treatment period, using ols.
+  post_filter <- ((D == 0) & (post == 1))
+  out_y_cont_post <- out_wols(y, int_cov, post_filter, i_weights)
+  # Combine the ORs for control group
+  out_y_cont <- post * out_y_cont_post + (1 - post) * out_y_cont_pre
 
   #Compute the Outcome regression for the treated group at the pre-treatment period, using ols.
-  reg.treat.coeff.pre <- stats::coef(stats::lm(y ~ -1 + int.cov,
-                                               subset = ((D==1) & (post==0)),
-                                               weights = i.weights))
-  out.y.treat.pre <-   as.vector(tcrossprod(reg.treat.coeff.pre, int.cov))
+  treat_pre <- ((D == 1) & (post == 0))
+  out_y_treat_pre <- out_wols(y, int_cov, treat_pre, i_weights)
   #Compute the Outcome regression for the treated group at the post-treatment period, using ols.
-  reg.treat.coeff.post <- stats::coef(stats::lm(y ~ -1 + int.cov,
-                                                subset = ((D==1) & (post==1)),
-                                                weights = i.weights))
-  out.y.treat.post <-   as.vector(tcrossprod(reg.treat.coeff.post, int.cov))
-
+  treat_post <- ((D == 1) & (post == 1))
+  out_y_treat_post <- out_wols(y, int_cov, treat_post, i_weights)
 
   #-----------------------------------------------------------------------------
   # First, the weights
-  w.treat.pre <- i.weights * D * (1 - post)
-  w.treat.post <- i.weights * D * post
-  w.cont.pre <- i.weights * ps.fit * (1 - D) * (1 - post)/(1 - ps.fit)
-  w.cont.post <- i.weights * ps.fit * (1 - D) * post/(1 - ps.fit)
+  w_d <- i_weights * D
+  w_treat_pre <- w_d * (1 - post)
+  w_treat_post <- w_d * post
+  i_p_d <- i_weights * ps_fit * (1 - D)
+  w_cont_pre  <- i_p_d * (1 - post) / (1 - ps_fit)
+  w_cont_post <- i_p_d * post / (1 - ps_fit)
 
-  w.d <- i.weights * D
-  w.dt1 <- i.weights * D * post
-  w.dt0 <- i.weights * D * (1 - post)
+  w_dt1 <- w_treat_post
+  w_dt0 <- w_treat_pre
 
   # Elements of the influence function (summands)
-  eta.treat.pre <- w.treat.pre * (y - out.y.cont) / mean(w.treat.pre)
-  eta.treat.post <- w.treat.post * (y - out.y.cont)/ mean(w.treat.post)
-  eta.cont.pre <- w.cont.pre * (y - out.y.cont) / mean(w.cont.pre)
-  eta.cont.post <- w.cont.post * (y - out.y.cont) / mean(w.cont.post)
+  y1 <- y - out_y_cont
+
+  eta_treat_pre  <- eta_val(w_treat_pre, 1, y1)#w.treat.pre * (y - out.y.cont) / mean(w.treat.pre)
+  eta_treat_post <- eta_val(w_treat_post, 1, y1)#w.treat.post * (y - out.y.cont)/ mean(w.treat.post)
+  eta_cont_pre   <- eta_val(w_cont_pre, 1, y1)#w.cont.pre * (y - out.y.cont) / mean(w.cont.pre)
+  eta_cont_post  <- eta_val(w_cont_post, 1, y1)#w.cont.post * (y - out.y.cont) / mean(w.cont.post)
 
   # extra elements for the locally efficient DRDID
-  eta.d.post <- w.d * (out.y.treat.post - out.y.cont.post)/mean(w.d)
-  eta.dt1.post <- w.dt1 * (out.y.treat.post - out.y.cont.post)/mean(w.dt1)
-  eta.d.pre <- w.d * (out.y.treat.pre - out.y.cont.pre)/mean(w.d)
-  eta.dt0.pre <- w.dt0 * (out.y.treat.pre - out.y.cont.pre)/mean(w.dt0)
+  y2 <- out_y_treat_post - out_y_cont_post
+  y3 <- out_y_treat_pre - out_y_cont_pre
+
+  eta_d_post   <- eta_val(w_d, 1, y2) #w.d * (out.y.treat.post - out.y.cont.post)/mean(w.d)
+  eta_dt1_post <- eta_val(w_dt1, 1, y2) #w.dt1 * (out.y.treat.post - out.y.cont.post)/mean(w.dt1)
+  eta_d_pre    <- eta_val(w_d, 1, y3) #w.d * (out.y.treat.pre - out.y.cont.pre)/mean(w.d)
+  eta_dt0_pre  <- eta_val(w_dt1, 1, y3) #w.dt0 * (out.y.treat.pre - out.y.cont.pre)/mean(w.dt0)
 
 
   # Estimator of each component
-  att.treat.pre <- mean(eta.treat.pre)
-  att.treat.post <- mean(eta.treat.post)
-  att.cont.pre <- mean(eta.cont.pre)
-  att.cont.post <- mean(eta.cont.post)
+  att_treat_pre <- mean(eta_treat_pre)
+  att_treat_post <- mean(eta_treat_post)
+  att_cont_pre <- mean(eta_cont_pre)
+  att_cont_post <- mean(eta_cont_post)
 
 
-  att.d.post <- mean(eta.d.post)
-  att.dt1.post <- mean(eta.dt1.post)
-  att.d.pre <- mean(eta.d.pre)
-  att.dt0.pre <- mean(eta.dt0.pre)
+  att_d_post <- mean(eta_d_post)
+  att_dt1_post <- mean(eta_dt1_post)
+  att_d_pre <- mean(eta_d_pre)
+  att_dt0_pre <- mean(eta_dt0_pre)
 
 
   # ATT estimator
-  dr.att <- (att.treat.post - att.treat.pre) - (att.cont.post - att.cont.pre) +
-    (att.d.post - att.dt1.post) - (att.d.pre - att.dt0.pre)
+  dr_att <- (att_treat_post - att_treat_pre) - (att_cont_post - att_cont_pre) +
+    (att_d_post - att_dt1_post) - (att_d_pre - att_dt0_pre)
   #-----------------------------------------------------------------------------
   #get the influence function to compute standard error
   #-----------------------------------------------------------------------------
   # First, the influence function of the nuisance functions
 
   # Asymptotic linear representation of OLS parameters in pre-period, control group
-  weights.ols.pre <- i.weights * (1 - D) * (1 - post)
-  wols.x.pre <- weights.ols.pre * int.cov
-  wols.eX.pre <- weights.ols.pre * (y - out.y.cont.pre) * int.cov
-  XpX.inv.pre <- qr.solve(crossprod(wols.x.pre, int.cov)/n)
-  asy.lin.rep.ols.pre <-  wols.eX.pre %*% XpX.inv.pre
+  d <- (1 - D)
+  p1 <- (1 - post)
+
+  asy_lin_rep_ols_pre <- asy_lin_rep_olsf(
+    i_weights, d, p1, int_cov, y, out_y_cont_pre
+  )
 
   # Asymptotic linear representation of OLS parameters in post-period, control group
-  weights.ols.post <- i.weights * (1 - D) * post
-  wols.x.post <- weights.ols.post * int.cov
-  wols.eX.post <- weights.ols.post * (y - out.y.cont.post) * int.cov
-  XpX.inv.post <- qr.solve(crossprod(wols.x.post, int.cov)/n)
-  asy.lin.rep.ols.post <-  wols.eX.post %*% XpX.inv.post
+  asy_lin_rep_ols_post <- asy_lin_rep_olsf(
+    i_weights, d, post, int_cov, y, out_y_cont_post
+  )
 
   # Asymptotic linear representation of OLS parameters in pre-period, treated
-  weights.ols.pre.treat <- i.weights * D * (1 - post)
-  wols.x.pre.treat <- weights.ols.pre.treat * int.cov
-  wols.eX.pre.treat <- weights.ols.pre.treat * (y - out.y.treat.pre) * int.cov
-  XpX.inv.pre.treat <- qr.solve(crossprod(wols.x.pre.treat, int.cov)/n)
-  asy.lin.rep.ols.pre.treat <-  wols.eX.pre.treat %*% XpX.inv.pre.treat
-
+  asy_lin_rep_ols_pre_treat <- asy_lin_rep_olsf(
+    i_weights, D, p1, int_cov, y, out_y_treat_pre
+  )
 
   # Asymptotic linear representation of OLS parameters in post-period, treated
-  weights.ols.post.treat <- i.weights * D *  post
-  wols.x.post.treat <- weights.ols.post.treat * int.cov
-  wols.eX.post.treat <- weights.ols.post.treat * (y - out.y.treat.post) * int.cov
-  XpX.inv.post.treat <- qr.solve(crossprod(wols.x.post.treat, int.cov)/n)
-  asy.lin.rep.ols.post.treat <-  wols.eX.post.treat %*% XpX.inv.post.treat
-
+  asy_lin_rep_ols_post_treat <- asy_lin_rep_olsf(
+    i_weights, D, post, int_cov, y, out_y_treat_post
+  )
   # Asymptotic linear representation of logit's beta's
-  score.ps <- i.weights * (D - ps.fit) * int.cov
-  Hessian.ps <- stats::vcov(pscore.tr) * n
-  asy.lin.rep.ps <-  score.ps %*% Hessian.ps
+  asy_lin_rep_ps <- asy_lin_rep_psf(i_weights, D, pscore_tr, int_cov)
   #-----------------------------------------------------------------------------
   # Now, the influence function of the "treat" component
   # Leading term of the influence function: no estimation effect
-  inf.treat.pre <- eta.treat.pre - w.treat.pre * att.treat.pre/mean(w.treat.pre)
-  inf.treat.post <- eta.treat.post - w.treat.post * att.treat.post/mean(w.treat.post)
-
+  inf_treat_pre <- inf_treatf1(eta_treat_pre, w_treat_pre, att_treat_pre)
+  inf_treat_post <- inf_treatf1(eta_treat_post, w_treat_post, att_treat_post)
   # Estimation effect from beta hat from post and pre-periods
   # Derivative matrix (k x 1 vector)
-  M1.post <- - base::colMeans(w.treat.post * post * int.cov)/mean(w.treat.post)
-  M1.pre <- - base::colMeans(w.treat.pre * (1 - post) * int.cov)/mean(w.treat.pre)
+  M1_post <- - base::colMeans(w_treat_post * post * int_cov) / mean(w_treat_post)
+  M1_pre  <- - base::colMeans(w_treat_pre * p1 * int_cov) / mean(w_treat_pre)
 
   # Now get the influence function related to the estimation effect related to beta's
-  inf.treat.or.post <- asy.lin.rep.ols.post %*% M1.post
-  inf.treat.or.pre <- asy.lin.rep.ols.pre %*% M1.pre
-  inf.treat.or <- inf.treat.or.post + inf.treat.or.pre
+  inf_treat_or_post <- asy_lin_rep_ols_post %*% M1_post
+  inf_treat_or_pre <- asy_lin_rep_ols_pre %*% M1_pre
+  inf_treat_or <- inf_treat_or_post + inf_treat_or_pre
 
   # Influence function for the treated component
-  inf.treat <- inf.treat.post - inf.treat.pre + inf.treat.or
+  inf_treat <- inf_treat_post - inf_treat_pre + inf_treat_or
   #-----------------------------------------------------------------------------
   # Now, get the influence function of control component
   # Leading term of the influence function: no estimation effect from nuisance parameters
-  inf.cont.pre <- eta.cont.pre - w.cont.pre * att.cont.pre/mean(w.cont.pre)
-  inf.cont.post <- eta.cont.post - w.cont.post * att.cont.post/mean(w.cont.post)
+  inf_cont_pre  <- inf_treatf1(eta_cont_pre, w_cont_pre, att_cont_pre)
+  inf_cont_post <- inf_treatf1(eta_cont_post, w_cont_post, att_cont_post)
 
   # Estimation effect from gamma hat (pscore)
   # Derivative matrix (k x 1 vector)
-  M2.pre <- base::colMeans(w.cont.pre *(y - out.y.cont - att.cont.pre) * int.cov)/mean(w.cont.pre)
-  M2.post <- base::colMeans(w.cont.post *(y - out.y.cont - att.cont.post) * int.cov)/mean(w.cont.post)
+  # M2.pre <- base::colMeans(w.cont.pre *(y - out.y.cont - att.cont.pre) * int.cov)/mean(w.cont.pre)
+  # M2.post <- base::colMeans(w.cont.post *(y - out.y.cont - att.cont.post) * int.cov)/mean(w.cont.post)
+  M2_pre <- m2_f(w_cont_pre, y, out_y_cont, int_cov, T, att_cont_pre)
+  M2_post <- m2_f(w_cont_post, y, out_y_cont, int_cov, T, att_cont_post)
   # Now the influence function related to estimation effect of pscores
-  inf.cont.ps <- asy.lin.rep.ps %*% (M2.post - M2.pre)
+  inf_cont_ps <- asy_lin_rep_ps %*% (M2_post - M2_pre)
 
   # Estimation effect from beta hat from post and pre-periods
   # Derivative matrix (k x 1 vector)
-  M3.post <- - base::colMeans(w.cont.post * post * int.cov) / mean(w.cont.post)
-  M3.pre <- - base::colMeans(w.cont.pre * (1 - post) * int.cov) / mean(w.cont.pre)
+  M3_post <- - base::colMeans(w_cont_post * post * int_cov) / mean(w_cont_post)
+  M3_pre <- - base::colMeans(w_cont_pre * p1 * int_cov) / mean(w_cont_pre)
 
   # Now get the influence function related to the estimation effect related to beta's
-  inf.cont.or.post <- asy.lin.rep.ols.post %*% M3.post
-  inf.cont.or.pre <- asy.lin.rep.ols.pre %*% M3.pre
-  inf.cont.or <- inf.cont.or.post + inf.cont.or.pre
+  inf_cont_or_post <- asy_lin_rep_ols_post %*% M3_post
+  inf_cont_or_pre  <- asy_lin_rep_ols_pre %*% M3_pre
+  inf_cont_or <- inf_cont_or_post + inf_cont_or_pre
 
   # Influence function for the control component
-  inf.cont <- inf.cont.post - inf.cont.pre + inf.cont.ps + inf.cont.or
+  inf_cont <- inf_cont_post - inf_cont_pre + inf_cont_ps + inf_cont_or
   #-----------------------------------------------------------------------------
   #get the influence function of the inefficient DR estimator (put all pieces together)
-  dr.att.inf.func1 <- inf.treat - inf.cont
+  dr_att_inf_func1 <- inf_treat - inf_cont
   #-----------------------------------------------------------------------------
   # Now, we only need to get the influence function of the adjustment terms
   # First, the terms as if all OR parameters were known
-  inf.eff1 <- eta.d.post - w.d * att.d.post/mean(w.d)
-  inf.eff2 <- eta.dt1.post - w.dt1 * att.dt1.post/mean(w.dt1)
-  inf.eff3 <- eta.d.pre - w.d * att.d.pre/mean(w.d)
-  inf.eff4 <- eta.dt0.pre - w.dt0 * att.dt0.pre/mean(w.dt0)
-  inf.eff <- (inf.eff1 - inf.eff2) - (inf.eff3 - inf.eff4)
+  inf_eff1 <- inf_treatf1(eta_d_post, w_d, att_d_post)#eta_d_post - w_d * att_d_post / mean(w.d)
+  inf_eff2 <- inf_treatf1(eta_dt1_post, w_dt1, att_dt1_post)#eta_dt1_post - w_dt1 * att.dt1.post/mean(w.dt1)
+  inf_eff3 <- inf_treatf1(eta_d_pre, w_d, att_d_pre)#eta_d_pre - w_d * att.d.pre/mean(w.d)
+  inf_eff4 <- inf_treatf1(eta_dt0_pre, w_dt0, att_dt0_pre)#eta_dt0_pre - w_dt0 * att.dt0.pre/mean(w.dt0)
+  inf_eff <- (inf_eff1 - inf_eff2) - (inf_eff3 - inf_eff4)
 
   # Now the estimation effect of the OR coefficients
-  mom.post<- base::colMeans((w.d/mean(w.d) -  w.dt1/mean(w.dt1)) * int.cov)
-  mom.pre <- base::colMeans((w.d/mean(w.d) -  w.dt0/mean(w.dt0)) * int.cov)
-  inf.or.post <- (asy.lin.rep.ols.post.treat - asy.lin.rep.ols.post) %*% mom.post
-  inf.or.pre <-  (asy.lin.rep.ols.pre.treat - asy.lin.rep.ols.pre) %*% mom.pre
-  inf.or <- inf.or.post - inf.or.pre
+  mom_post<- base::colMeans((w_d / mean(w_d) -  w_dt1 / mean(w_dt1)) * int_cov)
+  mom_pre <- base::colMeans((w_d / mean(w_d) -  w_dt0 / mean(w_dt0)) * int_cov)
+  inf_or_post <- (asy_lin_rep_ols_post_treat - asy_lin_rep_ols_post) %*% mom_post
+  inf_or_pre <-  (asy_lin_rep_ols_pre_treat - asy_lin_rep_ols_pre) %*% mom_pre
+  inf_or <- inf_or_post - inf_or_pre
   #-----------------------------------------------------------------------------
   #get the influence function of the locally efficient DR estimator (put all pieces together)
-  dr.att.inf.func <- dr.att.inf.func1 + inf.eff + inf.or
+  dr_att_inf_func <- dr_att_inf_func1 + inf_eff + inf_or
+
+  setup <- list(
+    n = n, y = y, d = D, int_cov = int_cov,
+    i_weights = i_weights, reg_att = dr_att
+  )
+
   #-----------------------------------------------------------------------------
-  if (boot == FALSE) {
-    # Estimate of standard error
-    se.dr.att <- stats::sd(dr.att.inf.func)/sqrt(n)
-    # Estimate of upper boudary of 95% CI
-    uci <- dr.att + 1.96 * se.dr.att
-    # Estimate of lower doundary of 95% CI
-    lci <- dr.att - 1.96 * se.dr.att
-    #Create this null vector so we can export the bootstrap draws too.
-    dr.boot <- NULL
-  }
-
-  if (boot == TRUE) {
-    if (is.null(nboot) == TRUE) nboot = 999
-    if(boot.type == "multiplier"){
-      # do multiplier bootstrap
-      dr.boot <- mboot.did(dr.att.inf.func, nboot)
-      # get bootstrap std errors based on IQR
-      se.dr.att <- stats::IQR(dr.boot) / (stats::qnorm(0.75) - stats::qnorm(0.25))
-      # get symmtric critival values
-      cv <- stats::quantile(abs(dr.boot/se.dr.att), probs = 0.95)
-      # Estimate of upper boudary of 95% CI
-      uci <- dr.att + cv * se.dr.att
-      # Estimate of lower doundary of 95% CI
-      lci <- dr.att - cv * se.dr.att
-    } else {
-      # do weighted bootstrap
-      dr.boot <- unlist(lapply(1:nboot, wboot_drdid_rc,
-                               n = n, y = y, post = post,
-                               D = D, int.cov = int.cov, i.weights = i.weights))
-      # get bootstrap std errors based on IQR
-      se.dr.att <- stats::IQR((dr.boot - dr.att)) / (stats::qnorm(0.75) - stats::qnorm(0.25))
-      # get symmtric critival values
-      cv <- stats::quantile(abs((dr.boot - dr.att)/se.dr.att), probs = 0.95)
-      # Estimate of upper boudary of 95% CI
-      uci <- dr.att + cv * se.dr.att
-      # Estimate of lower doundary of 95% CI
-      lci <- dr.att - cv * se.dr.att
-
-    }
-  }
+  ref_se <- bstrap_se(
+    dr_att_inf_func, boot, nboot, boot_type, setup, wboot_drdid_rc
+  )
 
   if(inffunc == FALSE) dr.att.inf.func <- NULL
   #---------------------------------------------------------------------
@@ -319,23 +254,23 @@ drdid_rc <-function(y, post, D, covariates, i.weights = NULL,
   call.param <- match.call()
   # Record all arguments used in the function
   argu <- mget(names(formals()), sys.frame(sys.nframe()))
-  boot.type <- ifelse(argu$boot.type=="multiplier", "multiplier", "weighted")
+  boot_type <- ifelse(argu$boot_type=="multiplier", "multiplier", "weighted")
   boot <- ifelse(argu$boot == TRUE, TRUE, FALSE)
   argu <- list(
     panel = FALSE,
     estMethod = "trad",
     boot = boot,
-    boot.type = boot.type,
+    boot.type = boot_type,
     nboot = nboot,
     type = "dr"
   )
 
-  ret <- (list(ATT = dr.att,
-               se = se.dr.att,
-               uci = uci,
-               lci = lci,
-               boots = dr.boot,
-               att.inf.func = dr.att.inf.func,
+  ret <- (list(ATT = dr_att,
+               se =  ref_se$se,
+               uci = ref_se$uci,
+               lci = ref_se$lci,
+               boots = ref_se$boots,
+               att.inf.func = dr_att_inf_func,
                call.param = call.param,
                argu = argu))
   # Define a new class
