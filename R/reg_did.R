@@ -121,14 +121,23 @@ bstrap_se <- function(inf_func, bstr, nboot = NULL, boot_type = "multiplier", se
 
 ############## PS
 
-fit_ps <- function(d, x_, w){
-  PS <- suppressWarnings(
+fit_ps <- function(d, x_, w, estrict = F){
+  ps <- suppressWarnings(
     glm(d ~ -1 + x_, family = 'binomial', weights = w)
   )
-  ps_fit <- PS$fitted.values |>
+  if(estrict){
+    if(ps$converged == FALSE){
+      warning(" glm algorithm did not converge")
+    }
+    if(anyNA(ps$coefficients)){
+      stop("Propensity score model coefficients have NA components. \n Multicollinearity (or lack of variation) of covariates is a likely reason.")
+    }
+  }
+
+  ps_fit <- ps$fitted.values |>
     as.vector() |>
     pmin(1 - 1e-16)
-  ps_ref <- list(ps_vcov = vcov(PS), fit = ps_fit)
+  ps_ref <- list(ps_vcov = vcov(ps), fit = ps_fit)
   return(ps_ref)
 }
 
@@ -151,8 +160,8 @@ inf_treatf1 <- function(eta_, w_, att){
 }
 
 
-m2_f <- function(w_, y_, ref_att, x_, post = F){
-  insid <- w_ * (y_ - ref_att) * x_
+m2_f <- function(w_, y_, ref_att, x_, post = F, y_eta = 0){
+  insid <- w_ * (y_ - ref_att - y_eta) * x_
   bellow <- 1
   if(post){
     bellow <- mean(w_)

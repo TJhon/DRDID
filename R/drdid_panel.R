@@ -67,8 +67,8 @@ NULL
 #'
 #' @export
 
-drdid_panel <-function(y1, y0, D, covariates, i.weights = NULL,
-                       boot = FALSE, boot.type =  "weighted", nboot = NULL,
+drdid_panel <-function(y1, y0, D, covariates, i_weights = NULL,
+                       boot = FALSE, boot_type =  "weighted", nboot = NULL,
                        inffunc = FALSE){
   #-----------------------------------------------------------------------------
   # D as vector
@@ -78,139 +78,81 @@ drdid_panel <-function(y1, y0, D, covariates, i.weights = NULL,
   # generate deltaY
   deltaY <- as.vector(y1 - y0)
   # Add constant to covariate vector
-  int.cov <- as.matrix(rep(1,n))
-  if (!is.null(covariates)){
-    if(all(as.matrix(covariates)[,1]==rep(1,n))){
-      int.cov <- as.matrix(covariates)
-    } else {
-      int.cov <- as.matrix(cbind(1, covariates))
-    }
-  }
+  int_cov <- has_intercept(covariates, n)
 
   # Weights
-  if(is.null(i.weights)) {
-    i.weights <- as.vector(rep(1, n))
-  } else if(min(i.weights) < 0) stop("i.weights must be non-negative")
+  i_weights <- has_weights(i_weights, n)
   #-----------------------------------------------------------------------------
   #Compute the Pscore by MLE
-  pscore.tr <- stats::glm(D ~ -1 + int.cov, family = "binomial", weights = i.weights)
-  if(pscore.tr$converged == FALSE){
-    warning(" glm algorithm did not converge")
-  }
-  if(anyNA(pscore.tr$coefficients)){
-    stop("Propensity score model coefficients have NA components. \n Multicollinearity (or lack of variation) of covariates is a likely reason.")
-  }
-  ps.fit <- as.vector(pscore.tr$fitted.values)
-  # Avoid divide by zero
-  ps.fit <- pmin(ps.fit, 1 - 1e-16)
+  ps <- fit_ps(D, int_cov, i_weights, T)
+  print('ps')
+  ps_fit <- ps[['fit']]
+  print('ps_fit')
+
   #Compute the Outcome regression for the control group using wols
-  reg.coeff <- stats::coef(stats::lm(deltaY ~ -1 + int.cov,
-                                     subset = D==0,
-                                     weights = i.weights))
-  if(anyNA(reg.coeff)){
-    stop("Outcome regression model coefficients have NA components. \n Multicollinearity (or lack of variation) of covariates is a likely reason.")
-  }
-  out.delta <-   as.vector(tcrossprod(reg.coeff, int.cov))
+  out_delta <- out_wols(deltaY, int_cov, D == 0, i_weights)
   #-----------------------------------------------------------------------------
   #Compute Traditional Doubly Robust DiD estimators
   # First, the weights
-  w.treat <- i.weights * D
-  w.cont <- i.weights * ps.fit * (1 - D)/(1 - ps.fit)
-  dr.att.treat <- w.treat * (deltaY - out.delta)
-  dr.att.cont <- w.cont * (deltaY - out.delta)
+  w_treat <- i_weights * D
+  w_cont <- i_weights * ps_fit * (1 - D) / (1 - ps_fit)
+  dr_att_treat <- w_treat * (deltaY - out_delta)
+  dr_att_cont <- w_cont * (deltaY - out_delta)
 
-  eta.treat <- mean(dr.att.treat) / mean(w.treat)
-  eta.cont <- mean(dr.att.cont) / mean(w.cont)
+  eta_treat <- eta_val(dr_att_treat, w_treat) #mean(dr.att.treat) / mean(w.treat)
+  eta_cont  <- eta_val(dr_att_cont, w_cont) #mean(dr.att.cont) / mean(w.cont)
 
-  dr.att <-   eta.treat - eta.cont
+  dr_att <-   eta_treat - eta_cont
   #-----------------------------------------------------------------------------
   #get the influence function to compute standard error
   #-----------------------------------------------------------------------------
   # First, the influence function of the nuisance functions
   # Asymptotic linear representation of OLS parameters
-  weights.ols <- i.weights * (1 - D)
-  wols.x <- weights.ols * int.cov
-  wols.eX <- weights.ols * (deltaY - out.delta) * int.cov
-  XpX.inv <- solve(crossprod(wols.x, int.cov)/n)
-  asy.lin.rep.wols <-  wols.eX %*% XpX.inv
+  asy_lin_rep_wols <- asy_lin_rep_olsf(i_weights, (1 - D), 1, int_cov, deltaY, out_delta)
 
   # Asymptotic linear representation of logit's beta's
-  score.ps <- i.weights * (D - ps.fit) * int.cov
-  Hessian.ps <- stats::vcov(pscore.tr) * n
-  asy.lin.rep.ps <-  score.ps %*% Hessian.ps
+  asy_lin_rep_ps <- asy_lin_rep_psf(i_weights, D, ps, int_cov)
 
   # Now, the influence function of the "treat" component
   # Leading term of the influence function: no estimation effect
-  inf.treat.1 <- (dr.att.treat - w.treat * eta.treat)
+  inf_treat_1 <- (dr_att_treat - w_treat * eta_treat)
   # Estimation effect from beta hat
   # Derivative matrix (k x 1 vector)
-  M1 <- base::colMeans(w.treat * int.cov)
+  M1 <- base::colMeans(w_treat * int_cov)
 
   # Now get the influence function related to the estimation effect related to beta's
-  inf.treat.2 <- asy.lin.rep.wols %*% M1
+  inf_treat_2 <- asy_lin_rep_wols %*% M1
 
   # Influence function for the treated component
-  inf.treat <- (inf.treat.1 - inf.treat.2) / mean(w.treat)
+  inf_treat <- (inf_treat_1 - inf_treat_2) / mean(w_treat)
   #-----------------------------------------------------------------------------
   # Now, get the influence function of control component
   # Leading term of the influence function: no estimation effect
-  inf.cont.1 <- (dr.att.cont - w.cont * eta.cont)
+  inf_cont_1 <- (dr_att_cont - w_cont * eta_cont)
   # Estimation effect from gamma hat (pscore)
   # Derivative matrix (k x 1 vector)
-  M2 <- base::colMeans(w.cont *(deltaY - out.delta - eta.cont) * int.cov)
+  M2 <- m2_f(w_cont, deltaY, out_delta, int_cov, F, eta_cont)
   # Now the influence function related to estimation effect of pscores
-  inf.cont.2 <- asy.lin.rep.ps %*% M2
+  inf_cont_2 <- asy_lin_rep_ps %*% M2
   # Estimation Effect from beta hat (weighted OLS)
-  M3 <-  base::colMeans(w.cont * int.cov)
+  M3 <-  base::colMeans(w_cont * int_cov)
   # Now the influence function related to estimation effect of regressions
-  inf.cont.3 <- asy.lin.rep.wols %*% M3
+  inf_cont_3 <- asy_lin_rep_wols %*% M3
 
   # Influence function for the control component
-  inf.control <- (inf.cont.1 + inf.cont.2 - inf.cont.3) / mean(w.cont)
+  inf_control <- (inf_cont_1 + inf_cont_2 - inf_cont_3) / mean(w_cont)
 
   #get the influence function of the DR estimator (put all pieces together)
-  dr.att.inf.func <- inf.treat - inf.control
-  #-----------------------------------------------------------------------------
-  if (boot == FALSE) {
-    # Estimate of standard error
-    se.dr.att <- stats::sd(dr.att.inf.func)/sqrt(n)
-    # Estimate of upper boudary of 95% CI
-    uci <- dr.att + 1.96 * se.dr.att
-    # Estimate of lower doundary of 95% CI
-    lci <- dr.att - 1.96 * se.dr.att
-    #Create this null vector so we can export the bootstrap draws too.
-    dr.boot <- NULL
-  }
+  dr_att_inf_func <- inf_treat - inf_control
 
-  if (boot == TRUE) {
-    if (is.null(nboot) == TRUE) nboot = 999
-    if(boot.type == "multiplier"){
-      # do multiplier bootstrap
-      dr.boot <- mboot.did(dr.att.inf.func, nboot)
-      # get bootstrap std errors based on IQR
-      se.dr.att <- stats::IQR(dr.boot) / (stats::qnorm(0.75) - stats::qnorm(0.25))
-      # get symmtric critival values
-      cv <- stats::quantile(abs(dr.boot/se.dr.att), probs = 0.95)
-      # Estimate of upper boudary of 95% CI
-      uci <- dr.att + cv * se.dr.att
-      # Estimate of lower doundary of 95% CI
-      lci <- dr.att - cv * se.dr.att
-    } else {
-      # do weighted bootstrap
-      dr.boot <- unlist(lapply(1:nboot, wboot.dr.tr.panel,
-                               n = n, deltaY = deltaY, D = D, int.cov = int.cov, i.weights = i.weights))
-      # get bootstrap std errors based on IQR
-      se.dr.att <- stats::IQR((dr.boot - dr.att)) / (stats::qnorm(0.75) - stats::qnorm(0.25))
-      # get symmtric critival values
-      cv <- stats::quantile(abs((dr.boot - dr.att)/se.dr.att), probs = 0.95)
-      # Estimate of upper boudary of 95% CI
-      uci <- dr.att + cv * se.dr.att
-      # Estimate of lower doundary of 95% CI
-      lci <- dr.att - cv * se.dr.att
-
-    }
-  }
-
+  setup <- list(
+    n = n, y = deltaY, d = D,
+    int_cov = int_cov, i_weights = i_weights,
+    reg_att = dr_att
+  )
+  ref_se <- bstrap_se(
+    dr_att_inf_func, boot, nboot, boot_type, setup, wboot.dr.tr.panel
+    )
 
   if(inffunc == FALSE) dr.att.inf.func <- NULL
   #---------------------------------------------------------------------
@@ -218,23 +160,23 @@ drdid_panel <-function(y1, y0, D, covariates, i.weights = NULL,
   call.param <- match.call()
   # Record all arguments used in the function
   argu <- mget(names(formals()), sys.frame(sys.nframe()))
-  boot.type <- ifelse(argu$boot.type=="multiplier", "multiplier", "weighted")
+  boot_type <- ifelse(argu$boot_type=="multiplier", "multiplier", "weighted")
   boot <- ifelse(argu$boot == TRUE, TRUE, FALSE)
   argu <- list(
     panel = TRUE,
     estMethod = "trad",
     boot = boot,
-    boot.type = boot.type,
+    boot.type = boot_type,
     nboot = nboot,
     type = "dr"
   )
 
-  ret <- (list(ATT = dr.att,
-               se = se.dr.att,
-               uci = uci,
-               lci = lci,
-               boots = dr.boot,
-               att.inf.func = dr.att.inf.func,
+  ret <- (list(ATT = dr_att,
+               se =  ref_se$se,
+               uci = ref_se$uci,
+               lci = ref_se$lci,
+               boots = ref_se$boots,
+               att.inf.func = dr_att_inf_func,
                call.param = call.param,
                argu = argu))
   # Define a new class

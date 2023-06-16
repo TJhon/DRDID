@@ -58,8 +58,8 @@ NULL
 #'
 #' @export
 
-drdid_rc1 <-function(y, post, D, covariates, i.weights = NULL,
-                     boot = FALSE, boot.type =  "weighted", nboot = NULL,
+drdid_rc1 <-function(y, post, D, covariates, i_weights = NULL,
+                     boot = FALSE, boot_type =  "weighted", nboot = NULL,
                      inffunc = FALSE){
   #-----------------------------------------------------------------------------
   # D as vector
@@ -71,67 +71,45 @@ drdid_rc1 <-function(y, post, D, covariates, i.weights = NULL,
   # post as vector
   post <- as.vector(post)
   # Add constant to covariate vector
-  int.cov <- as.matrix(rep(1,n))
-  if (!is.null(covariates)){
-    if(all(as.matrix(covariates)[,1]==rep(1,n))){
-      int.cov <- as.matrix(covariates)
-    } else {
-      int.cov <- as.matrix(cbind(1, covariates))
-    }
-  }
+  int_cov <- has_intercept(covariates, n)
 
   # Weights
-  if(is.null(i.weights)) {
-    i.weights <- as.vector(rep(1, n))
-  } else if(min(i.weights) < 0) stop("i.weights must be non-negative")
+  i_weights <- has_weights(i_weights, n)
   #-----------------------------------------------------------------------------
+
   #Compute the Pscore by MLE
-  pscore.tr <- stats::glm(D ~ -1 + int.cov, family = "binomial", weights = i.weights)
-  if(pscore.tr$converged == FALSE){
-    warning(" glm algorithm did not converge")
-  }
-  if(anyNA(pscore.tr$coefficients)){
-    stop("Propensity score model coefficients have NA components. \n Multicollinearity (or lack of variation) of covariates is a likely reason.")
-  }
-  ps.fit <- as.vector(pscore.tr$fitted.values)
-  # Avoid divide by zero
-  ps.fit <- pmin(ps.fit, 1 - 1e-16)
+  pscore_tr <- fit_ps(D, int_cov, i_weights, T)
+  ps_fit <- pscore_tr$fit
   #Compute the Outcome regression for the control group at the pre-treatment period, using ols.
-  reg.coeff.pre <- stats::coef(stats::lm(y ~ -1 + int.cov,
-                                         subset = ((D==0) & (post==0)),
-                                         weights = i.weights))
-  if(anyNA(reg.coeff.pre)){
-    stop("Outcome regression model coefficients have NA components. \n Multicollinearity (or lack of variation) of covariates is a likely reason.")
-  }
-  out.y.pre <-   as.vector(tcrossprod(reg.coeff.pre, int.cov))
+  pre_filter <- ((D == 0) & (post == 0))
+  out_y_pre <- out_wols(y, int_cov, pre_filter, i_weights)
+
   #Compute the Outcome regression for the control group at the pre-treatment period, using ols.
-  reg.coeff.post <- stats::coef(stats::lm(y ~ -1 + int.cov,
-                                          subset = ((D==0) & (post==1)),
-                                          weights = i.weights))
-  if(anyNA(reg.coeff.post)){
-    stop("Outcome regression model coefficients have NA components. \n Multicollinearity (or lack of variation) of covariates is a likely reason.")
-  }
-  out.y.post <-   as.vector(tcrossprod(reg.coeff.post, int.cov))
+  post_filter <- ((D == 0) * (post == 1))
+  out_y_post <- out_wols(y, int_cov, post_filter, i_weights)
   # Combine the ORs
-  out.y <- post * out.y.post + (1 - post) * out.y.pre
+  out_y <- post * out_y_post + (1 - post) * out_y_pre
   #-----------------------------------------------------------------------------
   # First, the weights
-  w.treat.pre <- i.weights * D * (1 - post)
-  w.treat.post <- i.weights * D * post
-  w.cont.pre <- i.weights * ps.fit * (1 - D) * (1 - post)/(1 - ps.fit)
-  w.cont.post <- i.weights * ps.fit * (1 - D) * post/(1 - ps.fit)
+  w_d <- i_weights * D
+  w_treat_pre <- w_d * (1 - post)
+  w_treat_post <- w_d * post
+  w_p_d <- i_weights * ps_fit * (1 - D)
+  w_cont_pre <- w_p_d * (1 - post) / (1 - ps.fit)
+  w_cont_post <- w_pd * post / (1 - ps.fit)
 
   # Elements of the influence function (summands)
-  eta.treat.pre <- w.treat.pre * (y - out.y) / mean(w.treat.pre)
-  eta.treat.post <- w.treat.post * (y - out.y)/ mean(w.treat.post)
-  eta.cont.pre <- w.cont.pre * (y - out.y) / mean(w.cont.pre)
-  eta.cont.post <- w.cont.post * (y - out.y) / mean(w.cont.post)
+  y1 <- y - out_y
+  eta_treat_pre  <- eta_val(w_treat_pre, 1, (y1)) # w.treat.pre * (y - out.y) / mean(w.treat.pre)
+  eta_treat_post <- eta_val(w_treat_post, 1, (y1))# w.treat.post * (y - out.y)/ mean(w.treat.post)
+  eta_cont_pre   <- eta_val(w_cont_pre, 1, (y1))  # w.cont.pre * (y - out.y) / mean(w.cont.pre)
+  eta_cont_post  <- eta_val(w_cont_post, 1, (y1)) # w.cont.post * (y - out.y) / mean(w.cont.post)
 
   # Estimator of each component
-  att.treat.pre <- mean(eta.treat.pre)
-  att.treat.post <- mean(eta.treat.post)
-  att.cont.pre <- mean(eta.cont.pre)
-  att.cont.post <- mean(eta.cont.post)
+  att_treat_pre <- mean(eta_treat_pre)
+  att_treat_post <- mean(eta_treat_post)
+  att_cont_pre <- mean(eta_cont_pre)
+  att_cont_post <- mean(eta_cont_post)
 
   # ATT estimator
   dr.att <- (att.treat.post - att.treat.pre) - (att.cont.post - att.cont.pre)
@@ -141,13 +119,10 @@ drdid_rc1 <-function(y, post, D, covariates, i.weights = NULL,
   # First, the influence function of the nuisance functions
 
   # Asymptotic linear representation of OLS parameters in pre-period
-  weights.ols.pre <- i.weights * (1 - D) * (1 - post)
-  wols.x.pre <- weights.ols.pre * int.cov
-  wols.eX.pre <- weights.ols.pre * (y - out.y.pre) * int.cov
-  XpX.inv.pre <- qr.solve(crossprod(wols.x.pre, int.cov)/n)
-  asy.lin.rep.ols.pre <-  wols.eX.pre %*% XpX.inv.pre
+  asy_lin_rep_ols_pre <- asy_lin_rep_olsf(i_weights, (1 - D), (1 - post), int_cov, y, out_y)
 
   # Asymptotic linear representation of OLS parameters in post-period
+  asy_lin_rep_ols_post <- asy_lin_rep_olsf(i_weights, (1 - D), post, int_cov, y, out_y_post)
   weights.ols.post <- i.weights * (1 - D) * post
   wols.x.post <- weights.ols.post * int.cov
   wols.eX.post <- weights.ols.post * (y - out.y.post) * int.cov
