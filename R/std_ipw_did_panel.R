@@ -60,8 +60,8 @@ NULL
 #'
 #' @export
 
-std_ipw_did_panel <-function(y1, y0, D, covariates, i.weights = NULL,
-                             boot = FALSE, boot.type = "weighted", nboot = NULL,
+std_ipw_did_panel <-function(y1, y0, D, covariates, i_weights = NULL,
+                             boot = FALSE, boot_type = "weighted", nboot = NULL,
                              inffunc = FALSE){
   #-----------------------------------------------------------------------------
   # D as vector
@@ -71,126 +71,81 @@ std_ipw_did_panel <-function(y1, y0, D, covariates, i.weights = NULL,
   # generate deltaY
   deltaY <- as.vector(y1 - y0)
   # Add constant to covariate vector
-  int.cov <- as.matrix(rep(1,n))
-  if (!is.null(covariates)){
-    if(all(as.matrix(covariates)[,1]==rep(1,n))){
-      int.cov <- as.matrix(covariates)
-    } else {
-      int.cov <- as.matrix(cbind(1, covariates))
-    }
-  }
+  int_cov <- has_intercept(covariates, n)
 
   # Weights
-  if(is.null(i.weights)) {
-    i.weights <- as.vector(rep(1, n))
-  } else if(min(i.weights) < 0) stop("i.weights must be non-negative")
+  i_weights <- has_weights(i_weights, n)
   #-----------------------------------------------------------------------------
+
   #Pscore estimation (logit) and also its fitted values
-  PS <- suppressWarnings(stats::glm(D ~ -1 + int.cov, family = "binomial", weights = i.weights))
-  ps.fit <- as.vector(PS$fitted.values)
-  # Do not divide by zero
-  ps.fit <- pmin(ps.fit, 1 - 1e-16)
+  ps <- fit_ps(D, int_cov, i_weights)
+  ps_fit <- ps$fit
   #-----------------------------------------------------------------------------
   #Compute IPW estimator
   # First, the weights
-  w.treat <- i.weights * D
-  w.cont <- i.weights * ps.fit * (1 - D)/(1 - ps.fit)
+  w_treat <- i_weights * D
+  w_cont <- i_weights * ps_fit * (1 - D)/(1 - ps_fit)
 
-  att.treat <- w.treat * deltaY
-  att.cont <- w.cont * deltaY
+  att_treat <- w_treat * deltaY
+  att_cont <- w_cont * deltaY
 
-  eta.treat <- mean(att.treat) / mean(w.treat)
-  eta.cont <- mean(att.cont) / mean(w.cont)
+  eta_treat <- eta_val(att_treat, w_treat)
+  eta_cont <- eta_val(att_cont, w_cont)
 
-  ipw.att <- eta.treat - eta.cont
+  ipw_att <- eta_treat - eta_cont
   #-----------------------------------------------------------------------------
   #get the influence function to compute standard error
   #-----------------------------------------------------------------------------
   # Asymptotic linear representation of logit's beta's
-  score.ps <- i.weights * (D - ps.fit) * int.cov
-  Hessian.ps <- stats::vcov(PS) * n
-  asy.lin.rep.ps <-  score.ps %*% Hessian.ps
+  asy_lin_rep_ps <- asy_lin_rep_psf(i_weights, D, ps, int_cov)
   #-----------------------------------------------------------------------------
   # Now, the influence function of the "treat" component
   # Leading term of the influence function: no estimation effect
-  inf.treat <- (att.treat - w.treat * eta.treat)/mean(w.treat)
+  inf_treat <- inf_treatf(att_treat, w_treat, eta_treat)
   # Now, get the influence function of control component
   # Leading term of the influence function: no estimation effect
-  inf.cont.1 <- (att.cont - w.cont * eta.cont)
+  inf_cont_1 <- (att_cont - w_cont * eta_cont)
   # Estimation effect from gamma hat (pscore)
   # Derivative matrix (k x 1 vector)
-  M2 <- base::colMeans(w.cont *(deltaY - eta.cont) * int.cov)
+  M2 <- m2_f(w_cont, deltaY, eta_cont, int_cov)
   # Now the influence function related to estimation effect of pscores
-  inf.cont.2 <- asy.lin.rep.ps %*% M2
+  inf_cont_2 <- asy_lin_rep_ps %*% M2
 
   # Influence function for the control component
-  inf.control <- (inf.cont.1 + inf.cont.2) / mean(w.cont)
+  inf_control <- (inf_cont_1 + inf_cont_2) / mean(w_cont)
 
   #get the influence function of the DR estimator (put all pieces together)
-  att.inf.func <- inf.treat - inf.control
+  att_inf_func <- inf_treat - inf_control
+
+  setup <- list(
+    n = n , y = deltaY, d = D,
+    int_cov = int_cov, i_weights,
+    reg_att = ipw_att
+  )
   #-----------------------------------------------------------------------------
-  if (boot == FALSE) {
-    # Estimate of standard error
-    se.att <- stats::sd(att.inf.func)/sqrt(n)
-    # Estimate of upper boudary of 95% CI
-    uci <- ipw.att + 1.96 * se.att
-    # Estimate of lower doundary of 95% CI
-    lci <- ipw.att - 1.96 * se.att
-
-    #Create this null vector so we can export the bootstrap draws too.
-    ipw.boot <- NULL
-  }
-  if (boot == TRUE) {
-    if (is.null(nboot) == TRUE) nboot = 999
-    if(boot.type == "multiplier"){
-      # do multiplier bootstrap
-      ipw.boot <- mboot.did(att.inf.func, nboot)
-      # get bootstrap std errors based on IQR
-      se.att <- stats::IQR(ipw.boot) / (stats::qnorm(0.75) - stats::qnorm(0.25))
-      # get symmtric critival values
-      cv <- stats::quantile(abs(ipw.boot/se.att), probs = 0.95)
-      # Estimate of upper boudary of 95% CI
-      uci <- ipw.att + cv * se.att
-      # Estimate of lower doundary of 95% CI
-      lci <- ipw.att - cv * se.att
-    } else {
-      # do weighted bootstrap
-      ipw.boot <- unlist(lapply(1:nboot, wboot.std.ipw.panel,
-                                n = n, deltaY = deltaY, D = D, int.cov = int.cov, i.weights = i.weights))
-      # get bootstrap std errors based on IQR
-      se.att <- stats::IQR(ipw.boot - ipw.att) / (stats::qnorm(0.75) - stats::qnorm(0.25))
-      # get symmtric critival values
-      cv <- stats::quantile(abs((ipw.boot - ipw.att)/se.att), probs = 0.95)
-      # Estimate of upper boudary of 95% CI
-      uci <- ipw.att + cv * se.att
-      # Estimate of lower doundary of 95% CI
-      lci <- ipw.att - cv * se.att
-
-    }
-
-  }
-  if(inffunc == FALSE) att.inf.func <- NULL
+  ref_se <-
+    bstrap_se(att_inf_func, boot, nboot, boot_type, setup, wboot.std.ipw.panel)
   #---------------------------------------------------------------------
   # record the call
   call.param <- match.call()
   # Record all arguments used in the function
   argu <- mget(names(formals()), sys.frame(sys.nframe()))
-  boot.type <- ifelse(argu$boot.type=="multiplier", "multiplier", "weighted")
+  boot.type <- ifelse(argu$boot_type=="multiplier", "multiplier", "weighted")
   boot <- ifelse(argu$boot == TRUE, TRUE, FALSE)
   argu <- list(
     panel = TRUE,
     normalized = TRUE,
     boot = boot,
-    boot.type = boot.type,
+    boot.type = boot_type,
     nboot = nboot,
     type = "ipw"
   )
-  ret <- (list(ATT = ipw.att,
-               se = se.att,
-               uci = uci,
-               lci = lci,
-               boots = ipw.boot,
-               att.inf.func = att.inf.func,
+  ret <- (list(ATT = ipw_att,
+               se =  ref_se$se,
+               uci = ref_se$uci,
+               lci = ref_se$lci,
+               boots = ref_se$boots,
+               att.inf.func = att_inf_func,
                call.param = call.param,
                argu = argu))
   # Define a new class

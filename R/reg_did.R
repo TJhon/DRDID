@@ -36,8 +36,11 @@ w_tc_val <- function(w, d, pst = 1){
   return(wtc)
 }
 
-eta_val <- function(reg_att, w_tc){
+eta_val <- function(reg_att, w_tc = 1, y = NULL){
   eta_r <- mean(reg_att) / mean(w_tc)
+  if(!is.null(y)){
+    eta_r <- reg_att * y / mean(reg_att)
+  }
   return(eta_r)
 }
 
@@ -115,3 +118,45 @@ bstrap_se <- function(inf_func, bstr, nboot = NULL, boot_type = "multiplier", se
   return(ref_se)
 }
 
+
+############## PS
+
+fit_ps <- function(d, x_, w){
+  PS <- suppressWarnings(
+    glm(d ~ -1 + x_, family = 'binomial', weights = w)
+  )
+  ps_fit <- PS$fitted.values |>
+    as.vector() |>
+    pmin(1 - 1e-16)
+  ps_ref <- list(ps_vcov = vcov(PS), fit = ps_fit)
+  return(ps_ref)
+}
+
+asy_lin_rep_psf <- function(w, d, ps, x_){
+  ps_fit <- ps$fit
+  vcov_ps <- ps$ps_vcov
+  n <- length(d)
+
+
+  score_ps <- w * (d - ps_fit) * x_
+  hessian_ps <- vcov_ps * n
+  asy_lin_ps <- score_ps %*% hessian_ps
+  return(asy_lin_ps)
+}
+
+inf_treatf1 <- function(eta_, w_, att){
+  inf_f_u <- w_ * att
+  inf_f <- eta_ - inf_f_u / mean(w_)
+  return(inf_f)
+}
+
+
+m2_f <- function(w_, y_, ref_att, x_, post = F){
+  insid <- w_ * (y_ - ref_att) * x_
+  bellow <- 1
+  if(post){
+    bellow <- mean(w_)
+  }
+  m2 <- colMeans(insid) / bellow
+
+}
